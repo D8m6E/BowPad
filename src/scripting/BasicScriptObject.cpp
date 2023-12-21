@@ -747,6 +747,8 @@ static const ScintillaCmd g_scintillaCmd[] = {
     {L"SciColourise", SCI_COLOURISE, SCI_COLOURISE, VT_NULL, VT_INT, VT_INT},
     {L"SciChangeLexerState", SCI_CHANGELEXERSTATE, SCI_CHANGELEXERSTATE, VT_NULL, VT_INT, VT_INT},
     {L"SciSetKeyWords", SCI_SETKEYWORDS, SCI_SETKEYWORDS, VT_NULL, VT_INT, VT_BSTR},
+    {L"SciSetFontLocale", SCI_SETFONTLOCALE, SCI_SETFONTLOCALE, VT_NULL, VT_NULL, VT_BSTR},
+    {L"SciGetFontLocale", SCI_GETFONTLOCALE, SCI_GETFONTLOCALE, VT_BSTR, VT_NULL, VT_NULL},
 };
 
 BasicScriptObject::BasicScriptObject(void* obj, const std::wstring& path)
