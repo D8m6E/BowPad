@@ -961,7 +961,7 @@ Hold down the Shift key to show EOLs as well." Keytip="WS">
           </MenuGroup>
           <MenuGroup>
             <Button CommandName="cmdConfigShortcuts" />
-            <!--<Button CommandName="cmdSettings" />-->
+            <Button CommandName="cmdSettings" />
           </MenuGroup>
           <MenuGroup>
             <Button CommandName="cmdExit" />
