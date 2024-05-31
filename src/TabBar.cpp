@@ -1,6 +1,6 @@
 ﻿// This file is part of BowPad.
 //
-// Copyright (C) 2013-2023 - Stefan Kueng
+// Copyright (C) 2013-2024 - Stefan Kueng
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU General Public License as published by
@@ -156,7 +156,6 @@ int CTabBar::InsertAtEnd(const wchar_t *subTabName)
     // remove the selection so it can be selected properly later.
     if (m_nItems == 1)
         TabCtrl_SetCurSel(*this, -1);
-    SubclassSpinBox();
     InvalidateRect(*this, nullptr, FALSE);
     return index;
 }
@@ -186,7 +185,6 @@ int CTabBar::InsertAfter(int index, const wchar_t *subTabName)
     if (m_nItems == 0)
         TabCtrl_SetCurSel(*this, -1);
     ++m_nItems;
-    SubclassSpinBox();
     InvalidateRect(*this, nullptr, FALSE);
     return ret;
 }
@@ -404,6 +402,28 @@ LRESULT CTabBar::RunProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
 {
     switch (message)
     {
+        case WM_PARENTNOTIFY:
+        {
+            UINT childMessage = LOWORD(wParam);
+
+            switch (childMessage)
+            {
+                case WM_CREATE:
+                {
+                    wchar_t className[100]{};
+                    GetClassName((HWND)lParam, className, _countof(className));
+                    if (wcscmp(UPDOWN_CLASS, className) == 0)
+                    {
+                        SetWindowLongPtr((HWND)lParam, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(this));
+
+                        m_tabBarSpinDefaultProc = reinterpret_cast<WNDPROC>(::SetWindowLongPtr((HWND)lParam, GWLP_WNDPROC, reinterpret_cast<LONG_PTR>(TabBarSpin_Proc)));
+                        m_spin                  = (HWND)lParam;
+                    }
+                }
+                break;
+            }
+        }
+        break;
         case WM_ERASEBKGND:
         {
             HDC      hDC = reinterpret_cast<HDC>(wParam);
@@ -483,7 +503,7 @@ LRESULT CTabBar::RunProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
 
             DrawMainBorder(&dis);
 
-            if (m_spin)
+            if (IsSpinVisible())
             {
                 RECT rcSpin{};
                 GetWindowRect(m_spin, &rcSpin);
@@ -492,7 +512,7 @@ LRESULT CTabBar::RunProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
                 dis.rcItem.right = rcSpin.left;
             }
             // paint the tabs first and then the borders
-            auto count       = GetItemCount();
+            auto count = GetItemCount();
             if (!count) // no pages added
             {
                 SelectObject(hDC, hOldFont);
@@ -516,7 +536,9 @@ LRESULT CTabBar::RunProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
                         {
                             dis.rcItem.right = min(dis.rcItem.right, rPage.right);
                             if (dis.rcItem.right != rPage.right || (dis.rcItem.right - dis.rcItem.left) > CDPIAware::Instance().Scale(*this, MIN_TAB_WIDTH))
+                            {
                                 DrawItem(&dis, static_cast<float>(Animator::GetValue(m_animVars[GetIDFromIndex(nTab).GetValue()])));
+                            }
                         }
                     }
                 }
@@ -537,7 +559,9 @@ LRESULT CTabBar::RunProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
                     {
                         dis.rcItem.right = min(dis.rcItem.right, rPage.right);
                         if (dis.rcItem.right != rPage.right || (dis.rcItem.right - dis.rcItem.left) > CDPIAware::Instance().Scale(*this, MIN_TAB_WIDTH))
+                        {
                             DrawItem(&dis, static_cast<float>(Animator::GetValue(m_animVars[GetIDFromIndex(nSel).GetValue()])));
+                        }
                     }
                 }
             }
@@ -677,7 +701,7 @@ LRESULT CTabBar::RunProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
             auto index = GetTabIndexAt(xPos, yPos);
             RECT rcItem{};
             TabCtrl_GetItemRect(*this, index, &rcItem);
-            if (m_spin)
+            if (IsSpinVisible())
             {
                 RECT rcSpin{};
                 GetWindowRect(m_spin, &rcSpin);
@@ -754,12 +778,12 @@ LRESULT CTabBar::RunProc(HWND hwnd, UINT message, WPARAM wParam, LPARAM lParam)
                 RECT rPage{};
                 GetClientRect(*this, &rPage);
                 TabCtrl_AdjustRect(*this, FALSE, &rPage);
-                if (m_spin)
+                if (IsSpinVisible())
                 {
                     RECT rcSpin{};
                     GetWindowRect(m_spin, &rcSpin);
                     MapWindowPoints(nullptr, *this, reinterpret_cast<LPPOINT>(&rcSpin), 2);
-                    rPage.right      = rcSpin.left;
+                    rPage.right = rcSpin.left;
                 }
                 if (m_currentHoverTabRect.left < rPage.right && m_currentHoverTabRect.right > 0)
                 {
@@ -996,7 +1020,7 @@ COLORREF CTabBar::GetTabColor(UINT item) const
     return clr;
 }
 
-void CTabBar::DrawMainBorder(const LPDRAWITEMSTRUCT lpdis) const
+void CTabBar::DrawMainBorder(const LPDRAWITEMSTRUCT lpdis)
 {
     GDIHelpers::FillSolidRect(lpdis->hDC, &lpdis->rcItem, CTheme::Instance().GetThemeColor(::GetSysColor(COLOR_3DFACE)));
 }
@@ -1275,7 +1299,6 @@ LRESULT CTabBar::TabBarSpin_Proc(HWND hwnd, UINT message, WPARAM wParam, LPARAM 
             PAINTSTRUCT ps;
             BeginPaint(hwnd, &ps);
             HDC  hdc = ps.hdc;
-
             RECT rcPaint{};
             GetClientRect(hwnd, &rcPaint);
             auto rcLeft       = rcPaint;
@@ -1474,13 +1497,29 @@ LRESULT CTabBar::TabBarSpin_Proc(HWND hwnd, UINT message, WPARAM wParam, LPARAM 
         break;
         case WM_DESTROY:
         {
-            pTab->m_spin = nullptr;
+            pTab->m_spin           = nullptr;
             break;
         }
         default:
             break;
     }
     return CallWindowProc(pTab->m_tabBarSpinDefaultProc, hwnd, message, wParam, lParam);
+}
+
+bool CTabBar::IsSpinVisible() const
+{
+    // Tried WM_SHOWWINDOW in TabBarSpin_Proc, but this was only ever sent with wParam == FALSE
+    // Then tried using WM_PAINT in TabBarSpin_Proc instead of WM_SHOWWINDOW with wParam == TRUE
+    // This was sent after WM_PAINT in RunProc, thus would create artifacts
+    // As I couldn't find any proof of guaranteed order, the below should always work
+
+    if (!m_spin)
+    {
+        return false;
+    }
+
+    LONG spinStyle = GetWindowLong(m_spin, GWL_STYLE);
+    return (spinStyle & WS_VISIBLE) != 0 ? true : false;
 }
 
 DocID CTabBar::GetIDFromIndex(int index) const
@@ -1516,29 +1555,6 @@ void CTabBar::NotifyTabDelete(int tab)
     nmHdr.hdr.idFrom   = reinterpret_cast<UINT_PTR>(this);
     nmHdr.tabOrigin    = tab;
     ::SendMessage(m_hParent, WM_NOTIFY, 0, reinterpret_cast<LPARAM>(&nmHdr));
-}
-
-void CTabBar::SubclassSpinBox()
-{
-    if (m_spin == nullptr)
-    {
-        EnumChildWindows(
-            *this, [](HWND hChild, LPARAM lParam) -> BOOL {
-                auto    pThis = reinterpret_cast<CTabBar *>(lParam);
-                wchar_t className[100]{};
-                GetClassName(hChild, className, _countof(className));
-                if (wcscmp(UPDOWN_CLASS, className) == 0)
-                {
-                    SetWindowLongPtr(hChild, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(pThis));
-
-                    pThis->m_tabBarSpinDefaultProc = reinterpret_cast<WNDPROC>(::SetWindowLongPtr(hChild, GWLP_WNDPROC, reinterpret_cast<LONG_PTR>(TabBarSpin_Proc)));
-                    pThis->m_spin                  = hChild;
-                    return FALSE;
-                }
-                return TRUE;
-            },
-            reinterpret_cast<LPARAM>(this));
-    }
 }
 
 bool CloseButtonZone::IsHit(int x, int y, const RECT &testZone) const

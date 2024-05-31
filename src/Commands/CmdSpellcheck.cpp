@@ -1,6 +1,6 @@
 ﻿// This file is part of BowPad.
 //
-// Copyright (C) 2015-2017, 2020-2023 - Stefan Kueng
+// Copyright (C) 2015-2017, 2020-2024 - Stefan Kueng
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU General Public License as published by
@@ -160,6 +160,7 @@ void CCmdSpellCheck::Check()
 #ifdef _DEBUG
         ProfileTimer timer(L"SpellCheck");
 #endif
+        // determine the spelling options for the current lexer and settings
         bool checkAll       = CIniSettings::Instance().GetInt64(L"spellcheck", L"checkall", 1) != 0;
         bool checkUppercase = CIniSettings::Instance().GetInt64(L"spellcheck", L"uppercase", 1) != 0;
         if (m_activeLexer != static_cast<int>(Scintilla().Lexer()))
@@ -183,34 +184,63 @@ void CCmdSpellCheck::Check()
             Scintilla().SetWordChars(g_sentenceChars.c_str());
         else
             Scintilla().SetWordChars(g_wordChars.c_str());
+        // start at the first visible line and check all visible lines
         Scintilla::TextRangeFull textRange{};
-        auto              firstLine = Scintilla().FirstVisibleLine();
-        auto              lastLine  = firstLine + Scintilla().LinesOnScreen();
-        auto              firstPos  = static_cast<Sci_Position>(Scintilla().PositionFromLine(firstLine));
-        textRange.chrg.cpMin        = firstPos;
-        textRange.chrg.cpMax        = textRange.chrg.cpMin;
-        auto lastPos                = Scintilla().PositionFromLine(lastLine) + Scintilla().LineLength(lastLine);
-        auto textLength             = Scintilla().Length();
+        auto                     firstLine = Scintilla().FirstVisibleLine();
+        auto                     lastLine  = firstLine + Scintilla().LinesOnScreen();
+        auto                     firstPos  = static_cast<Sci_Position>(Scintilla().PositionFromLine(firstLine));
+        textRange.chrg.cpMin               = firstPos;
+        textRange.chrg.cpMax               = textRange.chrg.cpMin;
+        auto lastPos                       = Scintilla().PositionFromLine(lastLine) + Scintilla().LineLength(lastLine);
+        auto textLength                    = Scintilla().Length();
         if (lastPos < 0)
             lastPos = textLength - textRange.chrg.cpMin;
+        // if we already checked some text of the visible lines, start from there
         if (m_lastCheckedPos)
-        {
             textRange.chrg.cpMax = static_cast<Sci_Position>(m_lastCheckedPos);
-        }
         auto start = GetTickCount64();
         while (textRange.chrg.cpMax < lastPos)
         {
             if (GetTickCount64() - start > 100)
             {
+                // to avoid a blocked UI, only check for 100ms and then continue later
                 m_lastCheckedPos = textRange.chrg.cpMax;
                 if (g_checkTimer)
                     SetTimer(GetHwnd(), g_checkTimer, 10, nullptr);
                 break;
             }
+            // split the whole text either into words or if m_useComprehensiveCheck is true into sentences
+            Scintilla().SetWordChars(g_wordChars.c_str());
+            // skip over whitespace
+            while (textRange.chrg.cpMax < lastPos)
+            {
+                auto c = Scintilla().CharacterAt(textRange.chrg.cpMax);
+                if (c > 0x20)
+                    break;
+                textRange.chrg.cpMax++;
+            }
+            // don't start in the middle of a word but at the beginning
             textRange.chrg.cpMin = static_cast<Sci_Position>(Scintilla().WordStartPosition(textRange.chrg.cpMax + 1, TRUE));
             if (textRange.chrg.cpMin < textRange.chrg.cpMax && textRange.chrg.cpMin >= firstPos)
-                break;
+            {
+                // word start is before the visible text, so we skip it
+                auto wordEnd = static_cast<Sci_Position>(Scintilla().WordEndPosition(textRange.chrg.cpMax, TRUE));
+                if (wordEnd <= textRange.chrg.cpMax)
+                {
+                    DebugBreak();
+                    break;
+                }
+                textRange.chrg.cpMax = wordEnd;
+                continue;
+            }
+            if (m_useComprehensiveCheck)
+                Scintilla().SetWordChars(g_sentenceChars.c_str());
             textRange.chrg.cpMax = static_cast<Sci_Position>(Scintilla().WordEndPosition(textRange.chrg.cpMin, TRUE));
+            if (textRange.chrg.cpMax > lastPos)
+            {
+                Scintilla().SetWordChars(g_wordChars.c_str());
+                textRange.chrg.cpMax = static_cast<Sci_Position>(Scintilla().WordEndPosition(textRange.chrg.cpMin, TRUE));
+            }
             if (textRange.chrg.cpMin == textRange.chrg.cpMax)
             {
                 textRange.chrg.cpMax++;
@@ -382,6 +412,12 @@ void CCmdSpellCheck::OnTimer(UINT id)
         KillTimer(GetHwnd(), g_checkTimer);
         Check();
     }
+}
+
+void CCmdSpellCheck::OnPluginNotify(UINT /*cmdId*/, const std::wstring& /*pluginName*/, LPARAM /*data*/)
+{
+    m_lastCheckedPos = 0;
+    SetTimer(GetHwnd(), g_checkTimer, 500, nullptr);
 }
 
 HRESULT CCmdSpellCheck::IUICommandHandlerUpdateProperty(REFPROPERTYKEY key, const PROPVARIANT* /*pPropVarCurrentValue*/, PROPVARIANT* pPropVarNewValue)
@@ -679,6 +715,7 @@ HRESULT CCmdSpellCheckCorrect::IUICommandHandlerExecute(UI_EXECUTIONVERB verb, c
                             // add to Dictionary
                             g_spellChecker->Add(sWord.c_str());
                         }
+                        NotifyPlugins(L"cmdSpellCheck", 1);
                     }
                 }
             }

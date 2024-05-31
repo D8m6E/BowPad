@@ -1,6 +1,6 @@
 ﻿// This file is part of BowPad.
 //
-// Copyright (C) 2013-2023 - Stefan Kueng
+// Copyright (C) 2013-2024 - Stefan Kueng
 //
 // This program is free software: you can redistribute it and/or modify
 // it under the terms of the GNU General Public License as published by
@@ -54,6 +54,7 @@
 #include <regex>
 #include <Shobjidl.h>
 #include <dwmapi.h>
+#include <fstream>
 
 IUIFramework* g_pFramework = nullptr; // Reference to the Ribbon framework.
 
@@ -536,7 +537,7 @@ STDMETHODIMP CMainWindow::Execute(
 void CMainWindow::About() const
 {
     CAboutDlg dlg(*this);
-    dlg.DoModal(g_hRes, IDD_ABOUTBOX, *this);
+    dlg.DoModal(g_hRes, IDD_ABOUTBOX, *this, NULL);
 }
 
 void CMainWindow::ShowCommandPalette()
@@ -1109,7 +1110,7 @@ LRESULT CMainWindow::HandleTabBarEvents(const NMHDR& nmHdr, WPARAM /*wParam*/, L
     return 0;
 }
 
-void CMainWindow::ShowTablistDropdown(HWND hWnd, int offsetX, int offsetY)
+void CMainWindow::ShowTablistDropdown(HWND hWnd, int offsetX, int offsetY, bool sortByTab)
 {
     if (hWnd)
     {
@@ -1127,9 +1128,10 @@ void CMainWindow::ShowTablistDropdown(HWND hWnd, int offsetX, int offsetY)
                 prepList.insert(std::make_pair(m_tabBar.GetTitle(i), i));
             }
             std::multimap<std::wstring, int, ci_lessW> tablist;
+            std::map<int, std::wstring>                tablistTab;
             for (auto& [tabTitle, tabIndex] : prepList)
             {
-                auto count = std::count_if(prepList.begin(), prepList.end(), [&](const auto& item) -> bool {
+                auto count = std::ranges::count_if(prepList, [&](const auto& item) -> bool {
                     return item.first == tabTitle;
                 });
                 if (count > 1)
@@ -1141,17 +1143,27 @@ void CMainWindow::ShowTablistDropdown(HWND hWnd, int offsetX, int offsetY)
                                                      tabTitle.c_str(),
                                                      pathBuf);
                     tablist.insert(std::make_pair(text, tabIndex + 1));
+                    tablistTab[tabIndex + 1] = text;
                 }
                 else
+                {
                     tablist.insert(std::make_pair(tabTitle, tabIndex + 1));
+                    tablistTab[tabIndex + 1] = tabTitle;
+                }
             }
-
-            for (auto& [tabTitle, tabIndex] : tablist)
+            if (sortByTab)
             {
-                if (tabIndex == (currentIndex + 1))
-                    AppendMenu(hMenu, MF_STRING | MF_CHECKED, tabIndex, tabTitle.c_str());
-                else
-                    AppendMenu(hMenu, MF_STRING, tabIndex, tabTitle.c_str());
+                for (auto& [tabIndex, tabTitle] : tablistTab)
+                {
+                    AppendMenu(hMenu, tabIndex == (currentIndex + 1) ? MF_STRING | MF_CHECKED : MF_STRING, tabIndex, tabTitle.c_str());
+                }
+            }
+            else
+            {
+                for (auto& [tabTitle, tabIndex] : tablist)
+                {
+                    AppendMenu(hMenu, tabIndex == (currentIndex + 1) ? MF_STRING | MF_CHECKED : MF_STRING, tabIndex, tabTitle.c_str());
+                }
             }
             TPMPARAMS tpm{};
             tpm.cbSize    = sizeof(TPMPARAMS);
@@ -1378,7 +1390,7 @@ void CMainWindow::HandleStatusBar(WPARAM wParam, LPARAM lParam)
                     auto  pos = GetMessagePos();
                     POINT pt  = {GET_X_LPARAM(pos), GET_Y_LPARAM(pos)};
                     ScreenToClient(m_statusBar, &pt);
-                    ShowTablistDropdown(m_statusBar, pt.x, pt.y);
+                    ShowTablistDropdown(m_statusBar, pt.x, pt.y, false);
                 }
                 break;
                 default:
@@ -1560,7 +1572,7 @@ LRESULT CMainWindow::DoCommand(WPARAM wParam, LPARAM lParam)
             PasteHistory();
             break;
         case cmdTabListDropdownMenu:
-            ShowTablistDropdown(reinterpret_cast<HWND>(lParam), 0, 0);
+            ShowTablistDropdown(reinterpret_cast<HWND>(lParam), 0, 0, true);
             break;
         case cmdAbout:
             About();
@@ -1845,10 +1857,11 @@ void CMainWindow::HandleAfterInit()
 
     if (!m_tabMovePath.empty())
     {
-        TabMove(m_tabMovePath, m_tabMoveSavePath, m_tabMoveMod, m_initLine, m_tabMoveTitle);
+        TabMove(m_tabMovePath, m_tabMoveSavePath, m_tabMoveMod, m_initLine, m_tabMoveTitle, m_tabMovePosInfoPath);
         m_tabMovePath.clear();
         m_tabMoveSavePath.clear();
         m_tabMoveTitle.clear();
+        m_tabMovePosInfoPath.clear();
     }
     EnsureAtLeastOneTab();
 
@@ -2059,7 +2072,7 @@ bool CMainWindow::SaveDoc(DocID docID, const std::wstring& path)
 // Happens when the user drags a tab out and drops it over a BowPad window.
 // path is the temporary file that contains the latest document.
 // savePath is the file we want to save the temporary file over and then use.
-void CMainWindow::TabMove(const std::wstring& path, const std::wstring& savePath, bool bMod, long line, const std::wstring& title)
+void CMainWindow::TabMove(const std::wstring& path, const std::wstring& savePath, bool bMod, long line, const std::wstring& title, const std::wstring& posInfoPath)
 {
     std::wstring filepath = CPathUtils::GetLongPathname(path);
 
@@ -2095,19 +2108,70 @@ void CMainWindow::TabMove(const std::wstring& path, const std::wstring& savePath
 
     GoToLine(line);
 
+    if (!posInfoPath.empty())
+    {
+        std::wifstream file(posInfoPath);
+        if (file.is_open())
+        {
+            std::wstring posString;
+            file >> posString;
+            file.close();
+
+            std::vector<std::wstring> dataVec;
+            stringtok(dataVec, posString, false, L"*");
+
+            size_t   vecIdx = 0;
+            CPosData pos;
+            pos.m_nFirstVisibleLine = _wtoi(dataVec[vecIdx++].c_str());
+            pos.m_nWrapLineOffset   = _wtoi(dataVec[vecIdx++].c_str());
+            pos.m_nStartPos         = _wtoi(dataVec[vecIdx++].c_str());
+            pos.m_nEndPos           = _wtoi(dataVec[vecIdx++].c_str());
+            pos.m_xOffset           = _wtoi(dataVec[vecIdx++].c_str());
+            pos.m_nSelMode          = static_cast<Scintilla::SelectionMode>(_wtoi(dataVec[vecIdx++].c_str()));
+            pos.m_nScrollWidth      = _wtoi(dataVec[vecIdx++].c_str());
+            pos.m_lastStyleLine     = _wtoi(dataVec[vecIdx++].c_str());
+            size_t nLineStates      = _wtoi(dataVec[vecIdx++].c_str());
+            pos.m_lineStateVector.resize(nLineStates);
+            for (size_t i = 0; i < nLineStates; ++i)
+            {
+                pos.m_lineStateVector.push_back(_wtoi(dataVec[vecIdx++].c_str()));
+            }
+            size_t nUndoActions = _wtoi(dataVec[vecIdx++].c_str());
+            if (nUndoActions)
+            {
+                pos.m_undoData.m_currentAction = _wtoi(dataVec[vecIdx++].c_str());
+                pos.m_undoData.m_savePoint     = _wtoi(dataVec[vecIdx++].c_str());
+                pos.m_undoData.m_tentative     = _wtoi(dataVec[vecIdx++].c_str());
+                for (size_t i = 0; i < nUndoActions; ++i)
+                {
+                    CUndoAction a;
+                    a.m_type     = _wtoi(dataVec[vecIdx++].c_str());
+                    a.m_position = _wtoi(dataVec[vecIdx++].c_str());
+                    a.m_text     = CStringUtils::base64_decode(CUnicodeUtils::StdGetUTF8(dataVec[vecIdx++]));
+                    pos.m_undoData.m_actions.push_back(a);
+                }
+            }
+            if (vecIdx == dataVec.size())
+            {
+                m_editor.RestoreCurrentPos(pos);
+            }
+        }
+    }
+
     m_fileTree.SetPath(CPathUtils::GetParentDirectory(savePath), false);
     ResizeChildWindows();
 
     DeleteFile(filepath.c_str());
 }
 
-void CMainWindow::SetTabMove(const std::wstring& path, const std::wstring& savePath, bool bMod, long line, const std::wstring& title)
+void CMainWindow::SetTabMove(const std::wstring& path, const std::wstring& savePath, bool bMod, long line, const std::wstring& title, const std::wstring& posInfoPath)
 {
-    m_tabMovePath     = path;
-    m_tabMoveSavePath = savePath;
-    m_tabMoveMod      = bMod;
-    m_initLine        = line;
-    m_tabMoveTitle    = title;
+    m_tabMovePath        = path;
+    m_tabMoveSavePath    = savePath;
+    m_tabMoveMod         = bMod;
+    m_initLine           = line;
+    m_tabMoveTitle       = title;
+    m_tabMovePosInfoPath = posInfoPath;
 }
 
 void CMainWindow::SetElevatedSave(const std::wstring& path, const std::wstring& savePath, long line)
@@ -3543,6 +3607,7 @@ void CMainWindow::HandleTabChange(const NMHDR& /*nmhdr*/)
     m_editor.SetEOLType(toEolMode(doc.m_format));
     m_editor.SetupLexerForLang(doc.GetLanguage());
     m_editor.RestoreCurrentPos(doc.m_position);
+    doc.m_position.m_undoData = {};
     m_editor.SetTabSettings(doc.m_tabSpace);
     m_editor.SetReadDirection(doc.m_readDir);
     RefreshAnnotations();
@@ -3814,13 +3879,15 @@ bool CMainWindow::OpenFileAs(const std::wstring& tempPath, const std::wstring& r
         return false;
     }
 
+    std::wstring filepath = CPathUtils::GetLongPathname(tempPath);
+
     // Get the id for the document we just loaded,
     // it'll currently have a temporary name.
-    auto  docID        = m_docManager.GetIdForPath(tempPath);
-    auto& doc          = m_docManager.GetModDocumentFromID(docID);
-    doc.m_path         = CPathUtils::GetLongPathname(realpath);
-    doc.m_bIsDirty     = bModified;
-    doc.m_bNeedsSaving = bModified;
+    auto         docID    = m_docManager.GetIdForPath(filepath);
+    auto&        doc      = m_docManager.GetModDocumentFromID(docID);
+    doc.m_path            = CPathUtils::GetLongPathname(realpath);
+    doc.m_bIsDirty        = bModified;
+    doc.m_bNeedsSaving    = bModified;
     m_docManager.UpdateFileTime(doc, true);
     std::wstring sFileName = CPathUtils::GetFileName(doc.m_path);
     const auto&  lang      = CLexStyles::Instance().GetLanguageForDocument(doc, m_scratchEditor);
@@ -4102,19 +4169,66 @@ bool CMainWindow::HandleCopyDataMoveTab(const COPYDATASTRUCT& cds)
     std::wstring              paths = std::wstring(static_cast<const wchar_t*>(cds.lpData), cds.cbData / sizeof(wchar_t));
     std::vector<std::wstring> dataVec;
     stringtok(dataVec, paths, false, L"*");
-    // Be a little untrusting of the clipboard data and if it's
-    // a mistake by the caller let them know so they
-    // don't throw away something we can't open.
-    if (dataVec.size() != 4)
+    if (dataVec.size() < 11)
     {
-        APPVERIFY(false); // Assume a bug if testing.
+        APPVERIFY(false);
         return false;
     }
-    std::wstring realPath = dataVec[0];
-    std::wstring tempPath = dataVec[1];
-    bool         bMod     = _wtoi(dataVec[2].c_str()) != 0;
-    int          line     = _wtoi(dataVec[3].c_str());
 
+#define DATAVECCHECK              \
+    if (dataVec.size() <= vecIdx) \
+    {                             \
+        APPVERIFY(false);         \
+        return false;             \
+    }
+
+    size_t       vecIdx   = 0;
+    std::wstring realPath = dataVec[vecIdx++];
+    std::wstring tempPath = dataVec[vecIdx++];
+    bool         bMod     = _wtoi(dataVec[vecIdx++].c_str()) != 0;
+
+    CPosData     pos;
+    pos.m_nFirstVisibleLine = _wtoi(dataVec[vecIdx++].c_str());
+    pos.m_nWrapLineOffset   = _wtoi(dataVec[vecIdx++].c_str());
+    pos.m_nStartPos         = _wtoi(dataVec[vecIdx++].c_str());
+    pos.m_nEndPos           = _wtoi(dataVec[vecIdx++].c_str());
+    pos.m_xOffset           = _wtoi(dataVec[vecIdx++].c_str());
+    pos.m_nSelMode          = static_cast<Scintilla::SelectionMode>(_wtoi(dataVec[vecIdx++].c_str()));
+    pos.m_nScrollWidth      = _wtoi(dataVec[vecIdx++].c_str());
+    pos.m_lastStyleLine     = _wtoi(dataVec[vecIdx++].c_str());
+    size_t nLineStates      = _wtoi(dataVec[vecIdx++].c_str());
+    pos.m_lineStateVector.resize(nLineStates);
+    for (size_t i = 0; i < nLineStates; ++i)
+    {
+        DATAVECCHECK;
+        pos.m_lineStateVector.push_back(_wtoi(dataVec[vecIdx++].c_str()));
+    }
+    size_t nUndoActions = _wtoi(dataVec[vecIdx++].c_str());
+    if (nUndoActions)
+    {
+        DATAVECCHECK;
+        pos.m_undoData.m_currentAction = _wtoi(dataVec[vecIdx++].c_str());
+        DATAVECCHECK;
+        pos.m_undoData.m_savePoint = _wtoi(dataVec[vecIdx++].c_str());
+        DATAVECCHECK;
+        pos.m_undoData.m_tentative = _wtoi(dataVec[vecIdx++].c_str());
+        for (size_t i = 0; i < nUndoActions; ++i)
+        {
+            CUndoAction a;
+            DATAVECCHECK;
+            a.m_type = _wtoi(dataVec[vecIdx++].c_str());
+            DATAVECCHECK;
+            a.m_position = _wtoi(dataVec[vecIdx++].c_str());
+            DATAVECCHECK;
+            a.m_text = CStringUtils::base64_decode(CUnicodeUtils::StdGetUTF8(dataVec[vecIdx++]));
+            pos.m_undoData.m_actions.push_back(a);
+        }
+    }
+    if (vecIdx != dataVec.size())
+    {
+        APPVERIFY(false);
+        return false;
+    }
     // Unsaved files / New tabs have an empty real path.
 
     if (!realPath.empty()) // If this is a saved file
@@ -4136,7 +4250,9 @@ bool CMainWindow::HandleCopyDataMoveTab(const COPYDATASTRUCT& cds)
     }
     bool opened = OpenFileAs(tempPath, realPath, bMod);
     if (opened)
-        GoToLine(line);
+    {
+        m_editor.RestoreCurrentPos(pos);
+    }
     return opened;
 }
 
@@ -4181,10 +4297,43 @@ void CMainWindow::HandleTabDroppedOutside(int tab, POINT pt)
     // Start a new instance of BowPad with this dropped tab, or add this tab to
     // the BowPad window the drop was done on. Then close this tab.
     // First save the file to a temp location to ensure all unsaved mods are saved.
-    std::wstring tempPath    = CTempFiles::Instance().GetTempFilePath(true);
-    auto         docID       = m_tabBar.GetIDFromIndex(tab);
-    auto&        doc         = m_docManager.GetModDocumentFromID(docID);
-    HWND         hDroppedWnd = WindowFromPoint(pt);
+    std::wstring tempPath     = CTempFiles::Instance().GetTempFilePath(true);
+    auto         docID        = m_tabBar.GetIDFromIndex(tab);
+    auto&        doc          = m_docManager.GetModDocumentFromID(docID);
+    HWND         hDroppedWnd  = WindowFromPoint(pt);
+
+    auto         getPosString = [&]() {
+        CPosData pos;
+        m_editor.SaveCurrentPos(pos);
+        std::wstring posString;
+
+        posString += std::to_wstring(pos.m_nFirstVisibleLine) + L"*";
+        posString += std::to_wstring(pos.m_nWrapLineOffset) + L"*";
+        posString += std::to_wstring(pos.m_nStartPos) + L"*";
+        posString += std::to_wstring(pos.m_nEndPos) + L"*";
+        posString += std::to_wstring(pos.m_xOffset) + L"*";
+        posString += std::to_wstring(static_cast<int>(pos.m_nSelMode)) + L"*";
+        posString += std::to_wstring(pos.m_nScrollWidth) + L"*";
+        posString += std::to_wstring(pos.m_lastStyleLine) + L"*";
+        posString += std::to_wstring(pos.m_lineStateVector.size()) + L"*";
+        for (size_t i = 0; i < pos.m_lineStateVector.size(); ++i)
+            posString += std::to_wstring(pos.m_lineStateVector[i]) + L"*";
+        posString += std::to_wstring(pos.m_undoData.m_actions.size()) + L"*";
+        if (!pos.m_undoData.m_actions.empty())
+        {
+            posString += std::to_wstring(pos.m_undoData.m_currentAction) + L"*";
+            posString += std::to_wstring(pos.m_undoData.m_savePoint) + L"*";
+            posString += std::to_wstring(pos.m_undoData.m_tentative) + L"*";
+            for (size_t i = 0; i < pos.m_undoData.m_actions.size(); ++i)
+            {
+                posString += std::to_wstring(pos.m_undoData.m_actions[i].m_type) + L"*";
+                posString += std::to_wstring(pos.m_undoData.m_actions[i].m_position) + L"*";
+                posString += CUnicodeUtils::StdGetUnicode(CStringUtils::base64_encode((pos.m_undoData.m_actions[i].m_text))) + L"*";
+            }
+        }
+        return posString;
+    };
+
     if (hDroppedWnd)
     {
         // If the drop target identifies a specific instance of BowPad found
@@ -4209,7 +4358,8 @@ void CMainWindow::HandleTabDroppedOutside(int tab, POINT pt)
             cpd.dwData          = CD_COMMAND_MOVETAB;
             std::wstring cpData = doc.m_path + L"*" + tempPath + L"*";
             cpData += bModified ? L"1*" : L"0*";
-            cpData += std::to_wstring(m_editor.GetCurrentLineNumber() + 1);
+            cpData += getPosString();
+
             cpd.lpData = static_cast<PVOID>(const_cast<LPWSTR>(cpData.c_str()));
             cpd.cbData = static_cast<DWORD>(cpData.size() * sizeof(wchar_t));
 
@@ -4280,12 +4430,17 @@ void CMainWindow::HandleTabDroppedOutside(int tab, POINT pt)
     // before we start the new process!
     CCommandHandler::Instance().OnDocumentClose(docID);
 
+    auto           posTempPath = CTempFiles::Instance().GetTempFilePath(true);
+    std::wofstream ofs(posTempPath);
+    ofs << getPosString();
+    ofs.close();
+
     // Start a new instance and open the tab there.
     std::wstring modPath = CPathUtils::GetModulePath();
-    std::wstring cmdLine = CStringUtils::Format(L"/multiple /tabmove /savepath:\"%s\" /path:\"%s\" /line:%Id /title:\"%s\"",
+    std::wstring cmdLine = CStringUtils::Format(L"/multiple /tabmove /savepath:\"%s\" /path:\"%s\" /line:%Id /title:\"%s\" /posinfopath:\"%s\"",
                                                 doc.m_path.c_str(), tempPath.c_str(),
                                                 m_editor.GetCurrentLineNumber() + 1,
-                                                m_tabBar.GetTitle(tab).c_str());
+                                                m_tabBar.GetTitle(tab).c_str(), posTempPath.c_str());
     if (bModified)
         cmdLine += L" /modified";
     SHELLEXECUTEINFO shExecInfo = {};
@@ -4388,6 +4543,7 @@ bool CMainWindow::ReloadTab(int tab, int encoding, bool dueToOutsideChanges)
                     editor->Scintilla().ClearAll();
                     editor->Scintilla().AppendText(text.size(), text.data());
                     editor->RestoreCurrentPos(doc.m_position);
+                    doc.m_position.m_undoData = {};
                     editor->Scintilla().EndUndoAction();
                     docReload.m_document = doc.m_document;
                 }
@@ -4407,6 +4563,7 @@ bool CMainWindow::ReloadTab(int tab, int encoding, bool dueToOutsideChanges)
     editor->SetupLexerForLang(lang);
     doc.SetLanguage(lang);
     editor->RestoreCurrentPos(docReload.m_position);
+    docReload.m_position.m_undoData = {};
     editor->Scintilla().SetReadOnly(docReload.m_bIsWriteProtected);
     editor->EnableChangeHistory();
     CEditorConfigHandler::Instance().ApplySettingsForPath(doc.m_path, editor, doc, false);
